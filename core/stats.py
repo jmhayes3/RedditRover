@@ -3,7 +3,7 @@ from core.database import Database
 import json
 import datetime
 from praw import Reddit
-from praw.objects import Submission, Comment, MoreComments
+from praw.models import Submission, Comment, MoreComments
 from configparser import ConfigParser
 from pkg_resources import resource_filename
 from time import time
