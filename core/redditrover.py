@@ -6,7 +6,7 @@ import pkgutil
 import traceback
 
 from pkg_resources import resource_filename
-from praw.errors import *
+from praw.exceptions import *
 import praw
 
 import plugins
@@ -58,9 +58,6 @@ class RedditRover:
     :ivar submission_poller: Anonymous reddit session for submissions.
     :vartype submission_poller: praw.Reddit
     :type submission_poller: praw.Reddit
-    :ivar comment_poller: Anonymous reddit session for comments.
-    :vartype comment_poller: praw.Reddit
-    :type comment_poller: praw.Reddit
     :ivar submissions: Generator of recent submissions on Reddit.
     :vartype submissions: praw.helpers.comment_stream
     :type submissions: praw.helpers.comment_stream
@@ -76,24 +73,24 @@ class RedditRover:
         self.mark_as_read, self.catch_http_exception, self.delete_after, self.verbose, self.update_interval, \
             subreddit, generate_stats, www_path = self._bot_variables()
         self.logger = logprovider.setup_logging(log_level=("DEBUG", "INFO")[self.verbose],
-                                                web_log_path=www_path + '_data/weblog.txt')
+                                                web_log_path='log.log')
         self.multi_thread = MultiThreader()
         self.lock = self.multi_thread.get_lock()
         self.database_update = Database()
         self.database_cmt = Database()
         self.database_subm = Database()
+
         try:
             self.praw_handler = RoverHandler()
             self.responders = []
             self.load_responders()
-            self.submission_poller = praw.Reddit(user_agent='Submission-Poller for several logins by /u/DarkMio',
-                                                 handler=self.praw_handler)
-            self.comment_poller = praw.Reddit(user_agent='Comment-Poller for several logins by /u/DarkMio',
-                                              handler=self.praw_handler)
+            self.submission_poller = praw.Reddit(
+                user_agent=self.config.get("SUBMISSION_BOT", "description"),
+                client_id=self.config.get("SUBMISSION_BOT", "app_key"),
+                client_secret=self.config.get("SUBMISSION_BOT", "app_secret"),
+                refresh_token=self.config.get("SUBMISSION_BOT", "refresh_token")
+            )
         except Exception as e:  # I am sorry linux, but ConnectionRefused Error can't be imported.
-            self.logger.error("PRAW Multiprocess server does not seem to be running. "
-                              "Please make sure that the server is running and responding. "
-                              "Bot is shutting down now.")
             self.logger.error(e)
             self.logger.error(traceback.print_exc())
             exit(-1)
@@ -101,8 +98,10 @@ class RedditRover:
             self.stats = StatisticsFeeder(self.database_update, self.praw_handler, www_path)
         else:
             self.stats = None
-        self.submissions = praw.helpers.submission_stream(self.submission_poller, subreddit, limit=None, verbosity=0)
-        self.comments = praw.helpers.comment_stream(self.comment_poller, subreddit, limit=None, verbosity=0)
+
+        self.sub = self.submission_poller.subreddit(subreddit)
+        self.submissions = self.sub.stream.submissions(pause_after=-1)
+        self.comments = self.sub.stream.comments(pause_after=-1)
         self.multi_thread.go([self.comment_thread], [self.submission_thread], [self.update_thread])
         self.multi_thread.join_threads()
 
@@ -117,25 +116,27 @@ class RedditRover:
         return get_b('mark_as_read'), get_b('catch_http_exception'), get_i('delete_after'), get_b('verbose'),\
             get_i('update_interval'), get('subreddit'), get_b('generate_stats'), get('www_path')
 
+
+    # TODO: fix this function, always returns false, breaking the program
     def _filter_single_thing(self, thing, responder):
         """
         Helper method to filter out submissions, returns `True` or `False` depending if it hits or fails.
 
         :param thing: Single submission or comment
-        :type thing: praw.objects.Comment | praw.objects.Submission
+        :type thing: praw.models.reddit.comment.Comment | praw.models.reddit.submission.Submission
         :param responder: Single plugin
         :type responder: PluginBase
         """
         # noinspection PyBroadException
         try:
-            if isinstance(thing, praw.objects.Comment):
+            if isinstance(thing, praw.models.reddit.comment.Comment):
                 db = self.database_cmt
             else:
                 db = self.database_subm
             b_name = responder.BOT_NAME
             if db.retrieve_thing(thing.name, b_name):
                 return False
-            if hasattr(thing, 'author') and type(thing.author) is praw.objects.Redditor:
+            if hasattr(thing, 'author') and type(thing.author) is praw.models.Redditor:
                 if db.check_user_ban(thing.author.name, b_name):
                     return False
                 if thing.author.name == responder.session.user.name and hasattr(responder, 'SELF_IGNORE') and \
@@ -163,7 +164,7 @@ class RedditRover:
             module = __import__(modname, fromlist="dummy")
             # every sub module has to have an object provider,
             # this makes importing the object itself easy and predictable.
-            module_object = module.init(Database(), self.praw_handler)
+            module_object = module.init(Database(), None)
             try:
                 if not isinstance(module_object, PluginBase):
                     raise ImportError('Module {} does not inherit from PluginBase class'.format(
@@ -193,8 +194,9 @@ class RedditRover:
         """
         self.logger.info("Opened submission stream successfully.")
         for subm in self.submissions:
-            self.comment_submission_worker(subm)
-            self.database_subm.add_submission_to_meta(1)
+            if subm is not None:
+                self.comment_submission_worker(subm)
+                self.database_subm.add_submission_to_meta(1)
 
     def comment_thread(self):
         """
@@ -203,55 +205,56 @@ class RedditRover:
         """
         self.logger.info("Opened comment stream successfully.")
         for comment in self.comments:
-            self.comment_submission_worker(comment)
-            self.database_cmt.add_comment_to_meta(1)
+            if comment is not None:
+                self.comment_submission_worker(comment)
+                self.database_cmt.add_comment_to_meta(1)
 
     def comment_submission_worker(self, thing):
         """
         Runs through all available plugins, filters them based on that out and calls the right method within a plugin.
 
         :param thing: Single submission or comment
-        :type thing: praw.objects.Comment | praw.objects.Submission
+        :type thing: praw.models.reddit.comment.Comment | praw.models.reddit.submission.Submission
         """
         for responder in self.responders:
             # Check beforehand if a subreddit or a user is banned from the bot / globally.
-            if self._filter_single_thing(thing, responder):
-                try:
-                    self.comment_submission_action(thing, responder)
-                except HTTPException as e:
-                    if self.catch_http_exception:
-                        self.logger.error('{} encountered: HTTPException - probably Reddits API.'.format(
-                            responder.BOT_NAME))
-                    else:
-                        raise e
-                except Exception as e:
-                    self.logger.error(traceback.print_exc())
-                    self.logger.error("{} error: {} < {}".format(responder.BOT_NAME, e.__class__.__name__, e))
+            # if self._filter_single_thing(thing, responder):
+            try:
+                self.comment_submission_action(thing, responder)
+            except PRAWException as e:
+                if self.catch_http_exception:
+                    self.logger.error('{} encountered: PRAWException - probably Reddits API.'.format(
+                        responder.BOT_NAME))
+                else:
+                    raise e
+            except Exception as e:
+                self.logger.error(traceback.print_exc())
+                self.logger.error("{} error: {} < {}".format(responder.BOT_NAME, e.__class__.__name__, e))
 
-    @retry(HTTPException)  # when the API fails, we're here to catch that.
+    # @retry(APIException)  # when the API fails, we're here to catch that.
     def comment_submission_action(self, thing, responder):
         """
         Separated function to run a single submission or comment through a single comment.
 
         :param thing: single submission or comment
-        :type thing: praw.objects.Submission | praw.objects.Comment
+        :type thing: praw.models.reddit.submission.Submission | praw.models.reddit.comment.Comment
         :param responder: single plugin
         :type responder: PluginBase
         :return:
         """
         try:
-            if isinstance(thing, praw.objects.Submission) and thing.is_self and thing.selftext:
+            if isinstance(thing, praw.models.reddit.submission.Submission) and thing.is_self and thing.selftext:
                 responded = responder.execute_submission(thing)
-            elif isinstance(thing, praw.objects.Submission) and thing.is_self:
+            elif isinstance(thing, praw.models.reddit.submission.Submission) and thing.is_self:
                 responded = responder.execute_titlepost(thing)
-            elif isinstance(thing, praw.objects.Submission):
+            elif isinstance(thing, praw.models.reddit.submission.Submission):
                 responded = responder.execute_link(thing)
             else:
                 responded = responder.execute_comment(thing)
 
             if responded:
                 self.logger.debug('{} successfully responded on {}'.format(responder.BOT_NAME, thing.permalink))
-                if isinstance(thing, praw.objects.Comment):
+                if isinstance(thing, praw.models.reddit.comment.Comment):
                     self.database_cmt.insert_into_storage(thing.name, responder.BOT_NAME)
                     caredict = {'id': thing.fullname, 'bot_name': responder.BOT_NAME, 'title': thing.submission.title,
                                 'username': thing.author.name, 'subreddit': thing.subreddit.display_name,
@@ -292,9 +295,9 @@ class RedditRover:
                     for thread in threads:
                         self.update_action(thread, responder)
                     responder.get_unread_messages(self.mark_as_read)
-                except HTTPException as e:
+                except PRAWException as e:
                     if self.catch_http_exception:
-                        self.logger.error('{} encountered: HTTPException - probably Reddits API.'.format(
+                        self.logger.error('{} encountered: PRAWException - probably Reddits API.'.format(
                             responder.BOT_NAME))
                     else:
                         raise e
@@ -315,7 +318,7 @@ class RedditRover:
             # after working through all update threads, sleep for five minutes. #saveresources
             sleep(self.update_interval)
 
-    @retry(HTTPException)  # when the API bugs out, we retry it for a while, this thread has time for it anyway.
+    @retry(APIException)  # when the API bugs out, we retry it for a while, this thread has time for it anyway.
     def update_action(self, thread, responder):
         """
         Separated function to map a thing to update and feed it back into a plugin.

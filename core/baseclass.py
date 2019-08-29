@@ -5,9 +5,9 @@ from core.handlers import RoverHandler
 from abc import ABCMeta, abstractmethod
 from configparser import ConfigParser
 from time import time
-from praw import handlers
+# from praw import handlers
 from pkg_resources import resource_filename
-from praw.errors import HTTPException
+from praw.exceptions import PRAWException
 
 import re
 import logging
@@ -123,7 +123,7 @@ class PluginBase(metaclass=ABCMeta):
             assert hasattr(self, 'USERNAME') and self.USERNAME \
                 and hasattr(self, 'session') and self.session, \
                 "Plugin is declared to be logged in, yet the session info is missing."
-            assert self.session.user.name.lower() == self.USERNAME.lower(), \
+            assert self.session.user.me().name.lower() == self.USERNAME.lower(), \
                 "This plugin is logged in with wrong credentials: \n" \
                 "is: {} - should be: {}".format(self.session.user.name, self.USERNAME)
         else:
@@ -150,13 +150,15 @@ class PluginBase(metaclass=ABCMeta):
         :type login: bool
         :raise: AssertionError
         """
-        self.session = praw.Reddit(user_agent=self.DESCRIPTION, handler=self.handler)
-        if login:
-            assert self.DESCRIPTION and self.handler and self.OA_APP_KEY and self.OA_APP_SECRET, \
-                "Necessary attributes are not set for this function."
-            self.session.set_oauth_app_info(self.OA_APP_KEY, self.OA_APP_SECRET,
-                                            'http://127.0.0.1:65010/authorize_callback')
-            self.oa_refresh(force=True)
+        self.session = praw.Reddit(
+            user_agent=self.DESCRIPTION,
+            client_id=self.config.get(self.BOT_NAME, "app_key"),
+            client_secret=self.config.get(self.BOT_NAME, "app_secret"),
+            refresh_token=self.config.get(self.BOT_NAME, "refresh_token")
+        )
+
+        if not login:
+            self.session.read_only = True
 
     @staticmethod
     def factory_config():
@@ -181,7 +183,11 @@ class PluginBase(metaclass=ABCMeta):
         assert self.OA_APP_KEY and self.OA_APP_SECRET, \
             'OAuth Configuration incomplete, please check your configuration file.'
         self.logger.info('Bot on hold, you need to input some data first to continue!')
-        self.session = praw.Reddit(user_agent=self.DESCRIPTION, handler=praw.handlers.DefaultHandler())
+        self.session = praw.Reddit(
+            user_agent=self.DESCRIPTION,
+            client_id=self.config.get(self.BOT_NAME, "app_key"),
+            client_secret=self.config.get(self.BOT_NAME, "app_secret")
+        )
         self.session.set_oauth_app_info(self.OA_APP_KEY, self.OA_APP_SECRET,
                                         'http://127.0.0.1:65010/authorize_callback')
         url = self.session.get_authorize_url(self.BOT_NAME, set(scopes), True)
@@ -195,7 +201,6 @@ class PluginBase(metaclass=ABCMeta):
         with open(resource_filename('config', 'bot_config.ini'), 'w') as f:
             self.config.write(f)
             f.close()
-        self.oa_refresh(force=True)
 
     def add_comment(self, thing_id, text):
         """
@@ -205,45 +210,12 @@ class PluginBase(metaclass=ABCMeta):
         :type thing_id: str
         :param text: Comment text
         :type text: str
-        :return: ``praw.objects.Comment`` from the responded comment.
+        :return: ``praw.models.reddit.comment.Comment`` from the responded comment.
         """
-        assert self.session and self.session.has_oauth_app_info, "{} is not logged in," \
-                                                                 "cannot comment on.".format(self.BOT_NAME)
-        self._oa_refresh()
         # noinspection PyProtectedMember
         return self.session._add_comment(thing_id, text)
 
-    @retry(HTTPException)
-    def _oa_refresh(self, force=False):
-        """
-        Main function to refresh OAuth access token.
-
-        :param force: Forces to refresh the access token
-        :type force: bool
-        """
-        assert self.OA_REFRESH_TOKEN and self.session, 'Cannot refresh, no refresh token or session is missing.'
-        self.logger.debug('Dispatching OAuth refresh.')
-        if force or time() > self.OA_VALID_UNTIL:
-            token_dict = self.session.refresh_access_information(self.OA_REFRESH_TOKEN)
-            self.OA_ACCESS_TOKEN = token_dict['access_token']
-            self.OA_VALID_UNTIL = time() + self.OA_TOKEN_DURATION
-            self.session.set_access_credentials(**token_dict)
-
-    def oa_refresh(self, force=False):
-        """
-        Calls _oa_refresh and tries to reset OAuth credentials if it fails several times.
-
-        :param force: Forces to refresh the access token
-        :type force: bool
-        """
-        try:
-            self._oa_refresh(force)
-        except (HTTPException, praw.errors.OAuthAppRequired):  # OAuthAppRequired: Possible bug, currently untracked
-            # Good news: This works. Bad news: I don't remember why the same keys suddenly work.
-            self.factory_reddit()
-            self._oa_refresh(True)
-
-    @retry(HTTPException)
+    @retry(PRAWException)
     def get_unread_messages(self, mark_as_read=True):
         """
         Runs down all unread messages of this logged in plugin and if wanted, marks them as read. This should always the
@@ -254,12 +226,9 @@ class PluginBase(metaclass=ABCMeta):
         :type mark_as_read: bool
         """
         if hasattr(self, "session"):
-            self.oa_refresh()
             try:
-                msgs = self.session.get_unread()
+                msgs = self.session.inbox.unread(mark_read=mark_as_read)
                 for msg in msgs:
-                    if mark_as_read:
-                        msg.mark_as_read()
                     self.on_new_message(msg)
                     if not msg.was_comment and not msg.author.name.lower() == 'automoderator':
                         self.database.add_message(msg.id, self.BOT_NAME, msg.created_utc,
@@ -273,7 +242,7 @@ class PluginBase(metaclass=ABCMeta):
         Needs a reddit session, oauth and a database pointer to function properly.
 
         :param message: a single praw message object
-        :type message: praw.objects.Message
+        :type message: praw.models.Message
         :param subreddit_banning_allowed: can block out the banning of subreddits
         :type subreddit_banning_allowed: bool
         :param user_banning_allowed: can block out the banning of users
@@ -317,7 +286,7 @@ class PluginBase(metaclass=ABCMeta):
         """
         r = praw.Reddit(user_agent='Bot Framework Test for a single submission.')
         thing = r.get_info(thing_id=thing_id)
-        if type(thing) is praw.objects.Submission:
+        if type(thing) is praw.models.reddit.submission.Submission:
             if thing.is_self and thing.selftext:
                 self.execute_submission(thing)
             elif thing.is_self:
@@ -352,7 +321,7 @@ class PluginBase(metaclass=ABCMeta):
         into the database, which later will get queried into the
 
         :param response_object: PRAW returns on a posted submission or comment the resulting object.
-        :type response_object: praw.objects.Submission | praw.objects.Comment
+        :type response_object: praw.models.reddit.submission.Submission | praw.models.reddit.comment.Comment
         :param lifetime: The exact moment in unixtime in seconds when this object will be invalid (update cycle)
         :type lifetime: int
         :params interval: The interval after what time of updating this should be queried again.
@@ -362,7 +331,7 @@ class PluginBase(metaclass=ABCMeta):
         if not self.database:
             self.logger.error('{} does not have a valid database pointer.'.format(self.BOT_NAME))
         else:
-            if isinstance(obj, praw.objects.Submission) or isinstance(obj, praw.objects.Comment):
+            if isinstance(obj, praw.models.reddit.submission.Submission) or isinstance(obj, praw.models.reddit.comment.Comment):
                 self.database.insert_into_update(response_object.fullname, self.BOT_NAME, lifetime, interval)
             else:
                 self.logger.error('response_object has an invalid object type.')
@@ -373,7 +342,7 @@ class PluginBase(metaclass=ABCMeta):
         **#** Function for handling a submission with a textbody (self.post)
 
         :param submission: A submission with a title and textbody.
-        :type submission: praw.objects.Submission
+        :type submission: praw.models.reddit.submission.Submission
         :return: **True** if the plugin reacted on in, **False** or **None** if he didn't.
         :rtype: bool | None
         """
@@ -385,7 +354,7 @@ class PluginBase(metaclass=ABCMeta):
         **#** Function for handling a link submission.
 
         :param link_submission: A submission with title and an url.
-        :type link_submission: praw.objects.Submission
+        :type link_submission: praw.models.reddit.submission.Submission
         :return: **True** if the plugin reacted on in, **False** or **None** if he didn't.
         :rtype: bool | None
         """
@@ -397,7 +366,7 @@ class PluginBase(metaclass=ABCMeta):
         **#** Function for handling a link submission.
 
         :param title_only: A submission with only a title. No textbody nor url.
-        :type title_only: praw.objects.Submission
+        :type title_only: praw.models.reddit.submission.Submission
         :return: **True** if the plugin reacted on in, **False** or **None** if he didn't.
         :rtype: bool | None
         """
@@ -409,7 +378,7 @@ class PluginBase(metaclass=ABCMeta):
         **#** Function for handling a comment.
 
         :param comment: A single comment. :warn: Comments can have empty text bodies.
-        :type comment: praw.objects.Comment
+        :type comment: praw.models.reddit.comment.Comment
         :return: **True** if the plugin reacted on in, **False** or **None** if he didn't.
         :rtype: bool | None
         """
@@ -422,7 +391,7 @@ class PluginBase(metaclass=ABCMeta):
         reached its next interval.
 
         :param thing: concrete loaded Comment or Submission
-        :type thing: praw.objects.Submission | praw.objects.Comment
+        :type thing: praw.models.reddit.submission.Submission | praw.models.reddit.comment.Comment
         :param created: unix timestamp when this `thing` was created.
         :type created: float
         :param lifetime: unix timestamp until this update-submission expires.
@@ -440,6 +409,6 @@ class PluginBase(metaclass=ABCMeta):
         **#** Method gets called when there is a new message for this plugin.
 
         :param message: Message Object from PRAW, contains author, title, text for example.
-        :type message: praw.objects.Message
+        :type message: praw.models.Message
         """
         pass
