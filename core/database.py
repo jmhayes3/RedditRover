@@ -1,9 +1,9 @@
-# coding=utf-8
-import logging
-import sqlite3
-from pkg_resources import resource_filename
 import time
 import atexit
+import sqlite3
+import logging
+
+from pkg_resources import resource_filename
 
 
 class Database:

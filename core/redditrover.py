@@ -1,20 +1,21 @@
-# coding=utf-8
-from configparser import ConfigParser
-from time import time, sleep, strptime
-from sys import exit
 import pkgutil
 import traceback
 
 from pkg_resources import resource_filename
-from praw.exceptions import *
+from configparser import ConfigParser
+from time import time, sleep, strptime
+from sys import exit
+from os import environ
+
 import praw
 
+from praw.exceptions import *
+
 import plugins
-from core import logprovider
-from misc import warning_filter
+
 from core import *
-from .decorators import retry
-from core.stats import StatisticsFeeder
+
+from misc import warning_filter
 
 
 class RedditRover:
@@ -52,9 +53,6 @@ class RedditRover:
     :ivar mark_as_read: True if all messages worked through are marked as read.
     :vartype mark_as_read: bool
     :type mark_as_read: bool
-    :ivar praw_handler: Will hold the handler to RateLimit based on OAuth / No-Auth sessions.
-    :vartype praw_handler: RedditRoverHandler
-    :type praw_handler: RedditRoverHandler
     :ivar submission_poller: Anonymous reddit session for submissions.
     :vartype submission_poller: praw.Reddit
     :type submission_poller: praw.Reddit
@@ -73,7 +71,7 @@ class RedditRover:
         self.mark_as_read, self.catch_http_exception, self.delete_after, self.verbose, self.update_interval, \
             subreddit, generate_stats, www_path = self._bot_variables()
         self.logger = logprovider.setup_logging(log_level=("DEBUG", "INFO")[self.verbose],
-                                                web_log_path='log.log')
+                                                web_log_path='web/log.log')
         self.multi_thread = MultiThreader()
         self.lock = self.multi_thread.get_lock()
         self.database_update = Database()
@@ -81,25 +79,24 @@ class RedditRover:
         self.database_subm = Database()
 
         try:
-            self.praw_handler = RoverHandler()
             self.responders = []
             self.load_responders()
-            self.submission_poller = praw.Reddit(
-                user_agent=self.config.get("SUBMISSION_BOT", "description"),
-                client_id=self.config.get("SUBMISSION_BOT", "app_key"),
-                client_secret=self.config.get("SUBMISSION_BOT", "app_secret"),
-                refresh_token=self.config.get("SUBMISSION_BOT", "refresh_token")
+            self.poller = praw.Reddit(
+                user_agent=environ["POLLER_DESCRIPTION"],
+                client_id=environ["POLLER_APP_KEY"],
+                client_secret=environ["POLLER_APP_SECRET"],
+                refresh_token=environ["POLLER_REFRESH_TOKEN"]
             )
-        except Exception as e:  # I am sorry linux, but ConnectionRefused Error can't be imported.
+        except Exception as e:
             self.logger.error(e)
             self.logger.error(traceback.print_exc())
             exit(-1)
-        if generate_stats:  # Not everyone hosts a webserver, not everyone wants stats.
-            self.stats = StatisticsFeeder(self.database_update, self.praw_handler, www_path)
+        if generate_stats:  # Just return None for now until refactor of stats module is complete.
+            self.stats = None
         else:
             self.stats = None
 
-        self.sub = self.submission_poller.subreddit(subreddit)
+        self.sub = self.poller.subreddit(subreddit)
         self.submissions = self.sub.stream.submissions(pause_after=-1)
         self.comments = self.sub.stream.comments(pause_after=-1)
         self.multi_thread.go([self.comment_thread], [self.submission_thread], [self.update_thread])
@@ -117,7 +114,7 @@ class RedditRover:
             get_i('update_interval'), get('subreddit'), get_b('generate_stats'), get('www_path')
 
 
-    # TODO: fix this function, always returns false, breaking the program
+    # TODO: fix this method, always returns false, breaking the program
     def _filter_single_thing(self, thing, responder):
         """
         Helper method to filter out submissions, returns `True` or `False` depending if it hits or fails.
@@ -164,7 +161,7 @@ class RedditRover:
             module = __import__(modname, fromlist="dummy")
             # every sub module has to have an object provider,
             # this makes importing the object itself easy and predictable.
-            module_object = module.init(Database(), None)
+            module_object = module.init(Database())
             try:
                 if not isinstance(module_object, PluginBase):
                     raise ImportError('Module {} does not inherit from PluginBase class'.format(
@@ -183,7 +180,7 @@ class RedditRover:
             # If nothing failed, it's fine to import.
             self.responders.append(module_object)
         if len(self.responders) == 0:
-            self.logger.info('No plugins found and / or working, exiting RedditRover.')
+            self.logger.info('No plugins found and/or working, exiting RedditRover.')
             sys.exit(0)
         self.logger.info("Imported a total of {} object(s).".format(len(self.responders)))
 
@@ -218,6 +215,7 @@ class RedditRover:
         """
         for responder in self.responders:
             # Check beforehand if a subreddit or a user is banned from the bot / globally.
+            # excluding functionality until fixed
             # if self._filter_single_thing(thing, responder):
             try:
                 self.comment_submission_action(thing, responder)
@@ -231,7 +229,6 @@ class RedditRover:
                 self.logger.error(traceback.print_exc())
                 self.logger.error("{} error: {} < {}".format(responder.BOT_NAME, e.__class__.__name__, e))
 
-    # @retry(APIException)  # when the API fails, we're here to catch that.
     def comment_submission_action(self, thing, responder):
         """
         Separated function to run a single submission or comment through a single comment.
@@ -266,6 +263,7 @@ class RedditRover:
                                 'username': thing.author.name, 'subreddit': thing.subreddit.display_name,
                                 'permalink': thing.permalink}
                     self.database_subm.add_to_stats(**caredict)
+        # TODO: fix this, implement banning based on API response
         except Forbidden:
             name = thing.subreddit.display_name
             self.database_subm.add_subreddit_ban_per_module(name, responder.BOT_NAME)
@@ -318,7 +316,6 @@ class RedditRover:
             # after working through all update threads, sleep for five minutes. #saveresources
             sleep(self.update_interval)
 
-    @retry(APIException)  # when the API bugs out, we retry it for a while, this thread has time for it anyway.
     def update_action(self, thread, responder):
         """
         Separated function to map a thing to update and feed it back into a plugin.

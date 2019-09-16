@@ -1,17 +1,14 @@
-# coding=utf-8
-from core.decorators import retry
-from core.handlers import RoverHandler
-
-from abc import ABCMeta, abstractmethod
-from configparser import ConfigParser
-from time import time
-# from praw import handlers
-from pkg_resources import resource_filename
-from praw.exceptions import PRAWException
-
 import re
 import logging
+
+from time import time
+from configparser import ConfigParser
+from pkg_resources import resource_filename
+from abc import ABCMeta, abstractmethod
+
 import praw
+
+from praw.exceptions import PRAWException
 
 
 class PluginBase(metaclass=ABCMeta):
@@ -52,9 +49,6 @@ class PluginBase(metaclass=ABCMeta):
     :ivar OA_APP_SECRET: *OAuth Secret Key, which has to be set in the config.
     :type OA_APP_SECRET: str
     :vartype OA_APP_SECRET: str
-    :ivar OA_TOKEN_DURATION: *OAuth Token validation timer. Usually set to 59minutes to have a good error margin
-    :type OA_TOKEN_DURATION: int | float
-    :vartype OA_TOKEN_DURATION: int | float
     :ivar OA_VALID_UNTIL: *Determines how long the OA_ACCESS_TOKEN is valid as timestamp.
                            Gets refreshed by `oa_refresh(force=False`
     :type OA_VALID_UNTIL: int | float
@@ -71,22 +65,15 @@ class PluginBase(metaclass=ABCMeta):
     :ivar database: Session to database, can be None if not needed.
     :type database: core.database.Database | None
     :vartype database: Database | None
-    :ivar handler: Specific handler given from the framework to keep API rate limits
-    :type handler: core.handler.RedditRoverHandler
-    :vartype handler: RedditRoverHandler
     """
 
-    def __init__(self, database, handler, bot_name, setup_from_config=True):
-        self.OA_TOKEN_DURATION = 3540   # Tokens are valid for 60min, this one is it for 59min.
+    def __init__(self, database, bot_name, setup_from_config=True):
         self.session = None             # Placeholder
         self.logger = self.factory_logger()
         self.database = database
         self.BOT_NAME = bot_name
         self.RE_BANMSG = re.compile(r'ban /([r|u])/([\d\w_]*)', re.UNICODE)
-        if not handler:
-            self.handler = RoverHandler()
-        else:
-            self.handler = handler
+
         if setup_from_config:
             self.config = self.factory_config()
             get = lambda x: self.config.get(bot_name, x)
@@ -100,10 +87,8 @@ class PluginBase(metaclass=ABCMeta):
                     self.USERNAME = get('username')
                     self.OA_APP_KEY = get('app_key')
                     self.OA_APP_SECRET = get('app_secret')
-                    if 'refresh_token' in options:
+                    if 'refresh_token' in options: # required now
                         self.OA_REFRESH_TOKEN = get('refresh_token')
-                    else:
-                        self._get_keys_manually()
                     self.factory_reddit(True)
                 else:
                     raise AttributeError('Config is incomplete, check for your keys.')
@@ -163,44 +148,14 @@ class PluginBase(metaclass=ABCMeta):
     @staticmethod
     def factory_config():
         """
-        Sets up a standard config-parser to bot_config.ini. Does not have to be used, but it is handy.
+        Sets up a standard config-parser to plugin_bot_config.ini. Does not have to be used, but it is handy.
 
-        :returns: Set up ConfigParser object, reading `/config/bot_config.ini`.
+        :returns: Set up ConfigParser object, reading `/config/plugin_bot_config.ini`.
         :rtype: ConfigParser
         """
         config = ConfigParser()
-        config.read(resource_filename('config', 'bot_config.ini'))
+        config.read(resource_filename('plugins', 'plugin_bot_config.ini'))
         return config
-
-    def _get_keys_manually(self):
-        """
-        Method to get Access and Refresh Keys manually. Has to be run through once when the credentials are set up,
-        writes then the refresh key into the config and logs the session in.
-        """
-        scopes = ['identity', 'account', 'edit', 'flair', 'history', 'livemanage', 'modconfig', 'modflair',
-                  'modlog', 'modothers', 'modposts', 'modself', 'modwiki', 'mysubreddits', 'privatemessages', 'read',
-                  'report', 'save', 'submit', 'subscribe', 'vote', 'wikiedit', 'wikiread']
-        assert self.OA_APP_KEY and self.OA_APP_SECRET, \
-            'OAuth Configuration incomplete, please check your configuration file.'
-        self.logger.info('Bot on hold, you need to input some data first to continue!')
-        self.session = praw.Reddit(
-            user_agent=self.DESCRIPTION,
-            client_id=self.config.get(self.BOT_NAME, "app_key"),
-            client_secret=self.config.get(self.BOT_NAME, "app_secret")
-        )
-        self.session.set_oauth_app_info(self.OA_APP_KEY, self.OA_APP_SECRET,
-                                        'http://127.0.0.1:65010/authorize_callback')
-        url = self.session.get_authorize_url(self.BOT_NAME, set(scopes), True)
-        self.logger.info('Please login with your bot account in reddit and open the following URL: {}'.format(url))
-        self.logger.info("After you've opened and accepted the OAuth prompt, enter the full URL it redirects you to.")
-        return_url = input('Please input the full url: ')
-        code = return_url.split('code=')[-1]
-        access_information = self.session.get_access_information(code)
-        self.OA_REFRESH_TOKEN = access_information['refresh_token']
-        self.config.set(self.BOT_NAME, 'refresh_token', access_information['refresh_token'])
-        with open(resource_filename('config', 'bot_config.ini'), 'w') as f:
-            self.config.write(f)
-            f.close()
 
     def add_comment(self, thing_id, text):
         """
@@ -215,7 +170,6 @@ class PluginBase(metaclass=ABCMeta):
         # noinspection PyProtectedMember
         return self.session._add_comment(thing_id, text)
 
-    @retry(PRAWException)
     def get_unread_messages(self, mark_as_read=True):
         """
         Runs down all unread messages of this logged in plugin and if wanted, marks them as read. This should always the
