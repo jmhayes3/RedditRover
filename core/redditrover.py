@@ -67,7 +67,9 @@ class RedditRover:
     def __init__(self):
         warning_filter.ignore()
         self.config = ConfigParser()
-        self.config.read(resource_filename('config', 'bot_config.ini'))
+        self.creds = ConfigParser()
+        self.config.read(resource_filename('config', 'config.ini'))
+        self.creds.read(resource_filename('config', 'creds.ini'))
         self.mark_as_read, self.catch_http_exception, self.delete_after, self.verbose, self.update_interval, \
             subreddit, generate_stats, www_path = self._bot_variables()
         self.logger = logprovider.setup_logging(log_level=("DEBUG", "INFO")[self.verbose],
@@ -82,10 +84,10 @@ class RedditRover:
             self.responders = []
             self.load_responders()
             self.poller = praw.Reddit(
-                user_agent=environ["POLLER_DESCRIPTION"],
-                client_id=environ["POLLER_APP_KEY"],
-                client_secret=environ["POLLER_APP_SECRET"],
-                refresh_token=environ["POLLER_REFRESH_TOKEN"]
+                user_agent=self.creds.get("Poller", "description"),
+                client_id=self.creds.get("Poller", "app_key"),
+                client_secret=self.creds.get("Poller", "app_secret"),
+                refresh_token=self.creds.get("Poller", "refresh_token")
             )
         except Exception as e:
             self.logger.error(e)
@@ -263,19 +265,20 @@ class RedditRover:
                                 'username': thing.author.name, 'subreddit': thing.subreddit.display_name,
                                 'permalink': thing.permalink}
                     self.database_subm.add_to_stats(**caredict)
-        # TODO: fix this, implement banning based on API response
-        except Forbidden:
-            name = thing.subreddit.display_name
-            self.database_subm.add_subreddit_ban_per_module(name, responder.BOT_NAME)
-            self.logger.error("{} is banned in '{}'. Auto banned".format(responder.BOT_NAME, name))
-        except NotFound:
-            pass
-        except (APIException, InvalidSubmission) as e:
-            if isinstance(e, APIException) and e.error_type == 'DELETED_LINK' \
-                    or isinstance(e, InvalidSubmission):
-                self.logger.warning('{} tried to comment on an already deleted resource - ignored.'.format(
-                    responder.BOT_NAME))
-                pass
+        # TODO: Fix these. Implement banning based on API response.
+        # except Forbidden:
+        #     # Adds the subreddit to the list of subreddits the bot has been banned from.
+        #     name = thing.subreddit.display_name
+        #     self.database_subm.add_subreddit_ban_per_module(name, responder.BOT_NAME)
+        #     self.logger.error("{} is banned in '{}'. Auto banned".format(responder.BOT_NAME, name))
+        # except NotFound:
+        #     pass
+        # except (APIException, InvalidSubmission) as e:
+        #     if isinstance(e, APIException) and e.error_type == 'DELETED_LINK' \
+        #             or isinstance(e, InvalidSubmission):
+        #         self.logger.warning("{} tried to comment on an already deleted resource - ignored.".format(
+        #             responder.BOT_NAME))
+        #         pass
         except Exception as e:
             raise e
 
@@ -294,8 +297,9 @@ class RedditRover:
                         self.update_action(thread, responder)
                     responder.get_unread_messages(self.mark_as_read)
                 except PRAWException as e:
+                    # Set in bot_config.ini
                     if self.catch_http_exception:
-                        self.logger.error('{} encountered: PRAWException - probably Reddits API.'.format(
+                        self.logger.error("{} encountered: PRAWException - probably Reddits API.".format(
                             responder.BOT_NAME))
                     else:
                         raise e
@@ -308,8 +312,8 @@ class RedditRover:
                     self.stats.render_overview()
                     self.stats.render_karma()
                     self.stats.render_messages()
-                except:
-                    pass
+                except Exception as e:
+                    raise e
             self.database_update.clean_up_database(int(time()) - int(self.delete_after))
             self.database_update.add_update_cycle_to_meta(1)
             self.lock.release()
@@ -334,6 +338,13 @@ class RedditRover:
                                    lifetime=time_strip(thread[3]),
                                    last_updated=time_strip(thread[4]),
                                    interval=thread[5])
+
+    def responder_thread(self):
+        """
+        Checks responder queue (not yet implemented) and loads/unloads responders accordingly.
+        """
+        pass
+
 
 if __name__ == "__main__":
     mb = RedditRover()
