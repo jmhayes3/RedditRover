@@ -68,7 +68,7 @@ class PluginBase(metaclass=ABCMeta):
     """
 
     def __init__(self, database, bot_name, setup_from_config=True):
-        self.session = None             # Placeholder
+        self.session = None  # Placeholder
         self.logger = self.factory_logger()
         self.database = database
         self.BOT_NAME = bot_name
@@ -76,24 +76,23 @@ class PluginBase(metaclass=ABCMeta):
 
         if setup_from_config:
             self.config = self.factory_config()
-            get = lambda x: self.config.get(bot_name, x)
-            self.DESCRIPTION = get('description')
-            self.IS_LOGGED_IN = self.config.getboolean(bot_name, 'is_logged_in')
-            options = [option for option, value in self.config.items(bot_name)]
+            self.DESCRIPTION = self.config.get(self.BOT_NAME, 'description')
+            self.IS_LOGGED_IN = self.config.getboolean(self.BOT_NAME, 'is_logged_in')
+            options = [option for option, value in self.config.items(self.BOT_NAME)]
             check_values = ('app_key', 'app_secret', 'self_ignore', 'username')
             if self.IS_LOGGED_IN:
                 if all(value in options for value in check_values):  # check if important keys are in
-                    self.SELF_IGNORE = self.config.getboolean(bot_name, 'self_ignore')
-                    self.USERNAME = get('username')
-                    self.OA_APP_KEY = get('app_key')
-                    self.OA_APP_SECRET = get('app_secret')
-                    if 'refresh_token' in options: # required now
-                        self.OA_REFRESH_TOKEN = get('refresh_token')
-                    self.factory_reddit(True)
+                    self.SELF_IGNORE = self.config.getboolean(self.BOT_NAME, 'self_ignore')
+                    self.USERNAME = self.config.get(self.BOT_NAME, 'username')
+                    self.OA_APP_KEY = self.config.get(self.BOT_NAME, 'app_key')
+                    self.OA_APP_SECRET = self.config.get(self.BOT_NAME, 'app_secret')
+                    if 'refresh_token' in options:  # required for logged in plugins
+                        self.OA_REFRESH_TOKEN = self.config.get(self.BOT_NAME, 'refresh_token')
+                    self.factory_reddit(login=True)
                 else:
                     raise AttributeError('Config is incomplete, check for your keys.')
-            else:
-                self.factory_reddit()
+            else:  # is rover
+                self.factory_reddit(login=False)
 
     def integrity_check(self):
         """Checks if the most important variables are initialized properly.
@@ -112,8 +111,8 @@ class PluginBase(metaclass=ABCMeta):
                 "This plugin is logged in with wrong credentials: \n" \
                 "is: {} - should be: {}".format(self.session.user.name, self.USERNAME)
         else:
-            assert hasattr(self, 'USERNAME') and self.USERNAME is False and \
-                hasattr(self, 'session') and self.session is False, \
+            assert not hasattr(self, 'USERNAME') and \
+                hasattr(self, 'session') and self.session is None, \
                 "Plugin is declared to be not logged in, yet has a set of credentials."
         return True
 
@@ -135,15 +134,15 @@ class PluginBase(metaclass=ABCMeta):
         :type login: bool
         :raise: AssertionError
         """
-        self.session = praw.Reddit(
-            user_agent=self.DESCRIPTION,
-            client_id=self.config.get(self.BOT_NAME, "app_key"),
-            client_secret=self.config.get(self.BOT_NAME, "app_secret"),
-            refresh_token=self.config.get(self.BOT_NAME, "refresh_token")
-        )
-
-        if not login:
-            self.session.read_only = True
+        if login:
+            self.session = praw.Reddit(
+                user_agent=self.DESCRIPTION,
+                client_id=self.config.get(self.BOT_NAME, "app_key"),
+                client_secret=self.config.get(self.BOT_NAME, "app_secret"),
+                refresh_token=self.config.get(self.BOT_NAME, "refresh_token")
+            )
+        else:  # is rover
+            self.session = None
 
     @staticmethod
     def factory_config():
@@ -179,7 +178,7 @@ class PluginBase(metaclass=ABCMeta):
         :param mark_as_read: Decides if the all messages get marked as read (speeds up the message reading every time)
         :type mark_as_read: bool
         """
-        if hasattr(self, "session"):
+        if self.session is not None:
             try:
                 msgs = self.session.inbox.unread(mark_read=mark_as_read)
                 for msg in msgs:

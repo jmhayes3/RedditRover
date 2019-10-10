@@ -14,7 +14,6 @@ from praw.exceptions import *
 import plugins
 
 from core import *
-
 from misc import warning_filter
 
 
@@ -24,7 +23,6 @@ class RedditRover:
     submissions and comments from Reddit. Varying from your implementation, it will fire those submissions and comments
     to your bot. Based on the configuration setting the bot will run a maintenance and update procedure, cleaning up
     the database and rolling over submissions / comments of a plugin which requested to update from there out on.
-
 
     :ivar logger: Central bot logger.
     :vartype logger: Logger
@@ -53,13 +51,13 @@ class RedditRover:
     :ivar mark_as_read: True if all messages worked through are marked as read.
     :vartype mark_as_read: bool
     :type mark_as_read: bool
-    :ivar submission_poller: Anonymous reddit session for submissions.
-    :vartype submission_poller: praw.Reddit
-    :type submission_poller: praw.Reddit
+    :ivar poller: Anonymous reddit session for submissions/comments.
+    :vartype poller: praw.Reddit
+    :type poller: praw.Reddit
     :ivar submissions: Generator of recent submissions on Reddit.
     :vartype submissions: praw.helpers.comment_stream
     :type submissions: praw.helpers.comment_stream
-    :ivar comments: Generaot of recent comments on Reddit.
+    :ivar comments: Generator of recent comments on Reddit.
     :vartype comments: praw.helpers.comment_stream
     :type comments: praw.helpers.comment_stream
     """
@@ -172,6 +170,7 @@ class RedditRover:
                 # (aka: is everything properly set to even function remotely.)
                 module_object.integrity_check()
                 self.database_update.register_module(module_object.BOT_NAME)
+                # status = PENDING
                 self.logger.info('Module "{}" is initialized and ready.'.format(module_object.__class__.__name__))
             except Exception as e:
                 # Catches _every_ error and skips the module. The import will now be reversed.
@@ -181,6 +180,7 @@ class RedditRover:
                 continue
             # If nothing failed, it's fine to import.
             self.responders.append(module_object)
+            # status = RUNNING
         if len(self.responders) == 0:
             self.logger.info('No plugins found and/or working, exiting RedditRover.')
             sys.exit(0)
@@ -265,6 +265,8 @@ class RedditRover:
                                 'username': thing.author.name, 'subreddit': thing.subreddit.display_name,
                                 'permalink': thing.permalink}
                     self.database_subm.add_to_stats(**caredict)
+        except Exception as e:
+            raise e
         # TODO: Fix these. Implement banning based on API response.
         # except Forbidden:
         #     # Adds the subreddit to the list of subreddits the bot has been banned from.
@@ -279,8 +281,6 @@ class RedditRover:
         #         self.logger.warning("{} tried to comment on an already deleted resource - ignored.".format(
         #             responder.BOT_NAME))
         #         pass
-        except Exception as e:
-            raise e
 
     def update_thread(self):
         """
@@ -297,8 +297,7 @@ class RedditRover:
                         self.update_action(thread, responder)
                     responder.get_unread_messages(self.mark_as_read)
                 except PRAWException as e:
-                    # Set in bot_config.ini
-                    if self.catch_http_exception:
+                    if self.catch_http_exception: # set in bot_config.ini
                         self.logger.error("{} encountered: PRAWException - probably Reddits API.".format(
                             responder.BOT_NAME))
                     else:
@@ -341,7 +340,7 @@ class RedditRover:
 
     def responder_thread(self):
         """
-        Checks responder queue (not yet implemented) and loads/unloads responders accordingly.
+        Queries database for 'pending' responders and loads them.
         """
         pass
 

@@ -46,6 +46,7 @@ class Database:
         self._meta_push = {'submissions': 0, 'comments': 0, 'cycles': 0}
         self._MAX_CACHE = 500
         self._date = time.time() // (60 * 60)
+
         atexit.register(self.write_out_meta_push, force=True)  # When the database gets closed, write out the meta
         # atexit.register(self.db.close)
         atexit.register(self.logger.warning, "DB connection has been closed.")
